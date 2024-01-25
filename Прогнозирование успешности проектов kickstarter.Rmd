@@ -1,0 +1,492 @@
+---
+title: "Predict whether a project will be successful on Kickstarter using Decision Tree"
+author: "S. Lunev"
+date: "20 12 2020"
+output: html_document
+---
+
+Suppose, you are the person, who have some business idea and you want to implement it in real life. But, unfortunately, you have not enough money to do that. One day you've heard about Kickstarter - the platform, which helps creative projects find backers and bring these projects to life. All you need to do is to set a goal (how much money do you want to get by some deadline) and launch your campaign.
+
+However, according to Kickstarter basics, **funding on Kickstarter is all-or-nothing**. No one will be charged for a pledge towards a project unless it reaches its funding goal. This way, creators always have the budget they scoped out before moving forward. 
+
+Thus, you need to determine what your chances are of success on Kickstarter and what you need to do for minimizing risk of failure. Fortunately, you have data about past projects on Kickstarter, so it is possible to do some research.
+
+## Goal of Research
+
+* predict the success of Kickstarter projects using observations and trends from past years
+
+As we want not only to predict successfulness of our project based on features, but also understand what we need to do for raising chances on success, it is a good option to use Decision Trees. This type of model is very highly interpretable, i.e. it is easy for a human to understand how exactly it makes predictions.
+
+### Data Review
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+#Loading packages
+library(coin)
+library(dplyr)
+library(ggplot2)
+library(tidyverse)
+library(stringr)
+library(tidyr)
+library(ggthemes)
+library(rpart)
+library(rpart.plot)
+library(readr)
+library(httr)
+library(caret)
+library(glue)
+
+#Loading data
+kickstarter = read_csv("C:/Users/stepa/Desktop/R data/ks-projects-201801.csv")
+```
+
+The kickstarter table is a dataset of projects from kickstarter.com that were launched in 2017. It has 378661 observations and 15 variables. The variables are the following:
+
+* **id** - unique project identification number
+* **name** - the name of the project
+* **category** - the category of the project
+* **main_category** - the category of the campaign
+* **currency** - currency used to support
+* **deadline** - deadline for crowdfunding
+* **goal** - fundraising goal. The funding goal is the amount of money that a creator needs to complete their project.
+* **launched** - campaign launch date
+* **pledged** - amount pledged by "crowd"
+* **state** - project status (successful / unsuccessful)
+* **backers** - number of sponsors
+* **country** - country pledged from
+* **usd_pledged** - conversion in US dollars of the pledged column (conversion done by kickstarter).
+* **usd pledge real** - conversion in US dollars of the pledged column (conversion from Fixer.io API).
+* **usd goal real** - conversion in US dollars of the goal column (conversion from Fixer.io API)
+
+### Preprocessing
+
+First, let's transform the columns to the required formats. Columns **category**, **main_category**, **currency**, **country**, **state** are better to be categorized as they accept limited values. Let's convert the **launched** column to Date so that the format matches **deadline** and remove timestamps, because we won't need it here.
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+# Look at structure of our dataset
+
+str(kickstarter)
+
+kickstarter$category = as.factor(kickstarter$category)
+kickstarter$main_category = as.factor(kickstarter$main_category)
+kickstarter$currency = as.factor(kickstarter$currency)
+kickstarter$country = as.factor(kickstarter$country)
+kickstarter$state = as.factor(kickstarter$state)
+
+
+kickstarter$launched = format(kickstarter$launched, format = "%Y/%m/%d")
+kickstarter$launched = lubridate::ymd(kickstarter$launched)
+```
+
+The next thing we need to do is remove the **pledged ** and **usd_pledged** columns, since these variables are correlated with each other.
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+kickstarter = select(kickstarter, -pledged, -"usd pledged")
+```
+
+Finally, let's check the data for missing values. 
+```{r message=FALSE, warning=FALSE, include=FALSE}
+summary(is.na.data.frame(kickstarter))
+```
+
+Fortunately, there are no missing values, except for the **name** column. There are 4 values missing. We can call these projects "Untitled".
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+kickstarter = kickstarter %>% mutate(name = replace_na(name, "Untitled"))
+```
+
+### Exploratory Data Analysis
+
+Let's look at the ratio of successful and unsuccessful projects. First of all, we need to delete observations with all other categories, since we are not interested in them.
+
+```{r}
+# Filtering rows with only successful and unsuccessful projects
+kickstarter = kickstarter %>% filter(state == 'failed'|state == 'successful')
+```
+
+Now we have 331 675 rows. Let's plot a bar chart and take a look at proportion. 
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+ggplot(kickstarter, aes(x = state)) + geom_bar(aes(y = (..count..)/sum(..count..), fill = state),alpha = 0.8, width = 0.7, show.legend = FALSE,
+)+ 
+  ggtitle("Number of successful and unsuccessful projects on Kickstarter") +
+  xlab("Project status") +
+  ylab("% of the total number of projects")+ theme_minimal()+ 
+  scale_y_continuous(breaks = scales::pretty_breaks(n = 10),labels=scales::percent)+
+  scale_fill_manual(values=c("red", "green"))+ scale_x_discrete(labels = c('Failed', "Successful"))
+```
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+# count the ratio of failed projects
+kickstarter_failed = kickstarter %>% filter(state == "failed")
+kickstarter_successful = kickstarter %>% filter(state == "successful")
+
+successful_obs = nrow(kickstarter_successful)
+failed_obs = nrow(kickstarter_failed)
+total_obs = successful_obs + failed_obs
+
+success_ratio = successful_obs/total_obs*100
+fail_ratio = failed_obs/total_obs*100
+
+success_ratio
+fail_ratio
+```
+We get that unsuccessful projects make up 59.6% of the total number of projects, while successful ones make up 40.3%. The difference is not too big, but when launching a project on Kickstarter, it is still worth considering this fact. Therefore, naively assuming that "all projects on Kickstarter are unsuccessful", we get a prediction accuracy of almost 60%. Hence the conclusion that our future model must work with an accuracy higher than 60%, otherwise it will be completely useless.
+
+Let's also see in which main categories (**main_category**) the largest share of successful projects. We calculate the ratio of successful projects to the total number of projects for each category.
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+# Create a dataset that will count the proportions for us
+kickstarter_prop_s = kickstarter_successful %>% count(main_category)
+kickstarter_prop_f = kickstarter_failed %>% count(main_category)
+kickstarter_prop = kickstarter_prop_s %>% inner_join(kickstarter_prop_f, by = "main_category") %>% mutate(prop = n.x/(n.x+n.y), max_prop=case_when(
+  prop > 0.60 ~ "m",
+  prop < 0.25 ~ "l",
+  TRUE ~ "0"
+))
+
+# Plotting
+ggplot(kickstarter_prop, aes(x = main_category)) + geom_bar(aes(y = prop, fill = max_prop),alpha = 0.9, width = 0.7, stat = "identity", show.legend = FALSE
+)+ ggtitle("Proportion of successful projects on Kickstarter") +
+        xlab("Main category") +
+        ylab("% of the total number of projects in this category")+ theme_minimal()+ 
+          scale_y_continuous(breaks = scales::pretty_breaks(n = 10),labels=scales::percent)+
+  scale_fill_manual(values=c("l"="red", "m" = "green", "0" = "darkgray")) + coord_flip()
+```
+  
+Based on the graph, it is easy to understand that most often projects are successful in the categories "Theater" and "Dancing". There are a lot of failed projects, first of all, in the categories "Journalism" and "Technology". There are 15 categories in total. Moreover, only 4 of them have a "success rate" above 50%.
+
+Cool, now we know it's better to do dance projects, or theatrical productions to raise your chances on Kickstarter. Nevertheless, we still have a probability, about 40%, that the project could fail. We need to find more reasons why projects become successful.
+
+Maybe it's the number of sponsors? Let's check.
+
+To look at the distribution of the number of sponsors, depending on the success of the project, it is convenient to build a boxplot. So, we make it and get this: 
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+ggplot(data = kickstarter, aes(x = state, y = backers)) + geom_boxplot() +xlab("Project state") + ylab("Number of backers")+ scale_x_discrete(labels = c('Failed', "Successful"))+ theme_minimal()
+``` 
+  
+Outliers keep us from seeing the whole picture, but we can already conclude that in some successful projects the number of sponsors is simply very huge compared to the failed ones. And the number of such projects is greater. It is very likely that these high numbers were due to a very active off-platform advertising campaign. However, let's remove the outliers and look at the bigger picture. Let's take the number 20,000 as the upper bound. In other words, we assume that we will never get more than 20,000 sponsors. After that, we will scale the graph so that it shows values in the range from 0 to 300.
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+kickstarter_outliers = kickstarter %>% filter(backers <= 20000)
+
+ggplot(data = kickstarter_outliers, aes(x = state, y = backers)) + geom_boxplot()+xlab("Project state") + ylab("Number of backers")+ 
+          scale_y_continuous(breaks = scales::pretty_breaks(n = 20))+ 
+    coord_cartesian(ylim = c(0, 300)) + scale_x_discrete(labels = c('Failed', "Successful")) + theme_minimal()
+``` 
+  
+That's better. Based on the resulting box plot, the following conclusions can already be drawn:
+
+* the medians of the number of sponsors differ significantly, while in successful projects it is higher and approximately equal to 70, while the median in failures is approximately equal to 3; 
+* there is a greater variability in number of backers among successful projects.
+
+Let's also make a table:
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+kickstarter_backers = kickstarter_outliers %>% group_by(state) %>% summarise(mean_backers = round(mean(backers),2), median_backers = median(backers), min_backers = min(backers) ,max_backers = max(backers))
+knitr::kable(kickstarter_backers, col.names = c("state", "mean backers", "median", "min", "max"))
+```
+So, there is a significant difference between mean and median in both categories, not considering very big outliers with more than 20K backers.
+
+Great, now we know how the number of sponsors is distributed, depending on the category. However, what is the minimum number of sponsors we need to get in order to hope for success?
+Boxplot below shows that 75% of successful projects have more than 33 sponsors.
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+ggplot(data = kickstarter_outliers, aes(x = state, y = backers)) + geom_boxplot()+xlab("Project state") + ylab("Number of backers")+ 
+          scale_y_continuous(breaks = scales::pretty_breaks(n = 15))+ 
+    coord_cartesian(ylim = c(0, 50)) + scale_x_discrete(labels = c('Failed', "Successful")) + theme_minimal()
+
+```
+  
+If we set the minimum with a value of 33, the probability that our project will be successful with the number of sponsors ≥ 33 will be 82% (successful projects with sponsors ≥ 33 / all projects with sponsors ≥ 33). But what if we go lower, can we get a higher probability, or vice versa? Up to what point do we need to go down or up in order to get the optimal probability?
+
+To do this, let's build a table with a plot and see how additional probabilities are distributed. Additional probability is the change in the probability of success that arises when the number of backers is incremented by one unit. It is like marginal cost in economics, but for probabilities.
+
+Additional probability = $\displaystyle \frac{\partial Prob_s}{\partial N_b}$
+
+where
+
+$Prob_s$ - Probability of success
+
+$N_b$ - Number of backers
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+kick_help = kickstarter_outliers %>% count(backers)
+kick_help_f = kickstarter_outliers %>% filter(state == "failed")%>% count( backers)
+kick_help_s = kickstarter_outliers %>% filter(state == "successful")%>% count(backers)
+
+kick_help_fs = full_join(kick_help_s, kick_help_f, by = "backers") %>% rename(
+     success= n.x,
+     failed= n.y
+    )
+
+kick_help_fs[is.na(kick_help_fs)] = 0
+kick_help_full = full_join(kick_help_fs, kick_help, by = "backers") %>% rename(total = n) %>% arrange(backers) 
+
+# creating a new dataframe, in which we will add probabilities and description through a for loop
+
+prob_data = data.frame(matrix(ncol = 2, nrow = nrow(kick_help_full)))
+colnames(prob_data) <- c("num_backers", "probability_of_success")
+
+for (backer in kick_help_full$backers) {
+  
+  # Adding text in the first column of the dataframe
+  prob_data[backer,1] = backer
+  
+  # calculating probability of success with number of backers equal or higher than n
+  backers_filtered = kick_help_full %>% filter(backers >= backer)
+  suc_sum = sum(backers_filtered$success)
+  total_sum = sum(backers_filtered$total)
+  prob_data[backer,2] = suc_sum/total_sum*100
+}
+prob_data = filter(prob_data, !is.na(probability_of_success) == TRUE)
+
+# Adding row, where backers more or equal to zero (proportion of the whole dataset)
+prob_data = prob_data %>% add_row(num_backers = 0, probability_of_success = success_ratio)
+
+ swap <- function(x) c(last(x), head(x, -1L))
+prob_data = prob_data %>% mutate_each(funs(swap), num_backers, probability_of_success)
+prob_data = prob_data %>% mutate(additional_prob = (probability_of_success - lag(probability_of_success))/(num_backers-lag(num_backers)))
+
+knitr::kable(prob_data, col.names = c("Number of Backers", "Probability of Success", "Additional Probability"))
+```
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+ggplot(prob_data, aes(x = num_backers, y = additional_prob), stat = "identity")+geom_point()+ geom_line(color="red") +
+  coord_cartesian(xlim = c(0, 100))+
+  scale_y_continuous(breaks = scales::pretty_breaks(n = 15))+
+  scale_x_continuous(breaks = scales::pretty_breaks(n = 15)) + 
+  xlab("Number of Backers (≥n)") + 
+  ylab("Additional probability of success") + theme_minimal()
+```
+  
+The greatest increase in the probability of success occurs when the number of sponsors increases from 0 to 1, which is obvious. Further, with an increase in the number of sponsors, the "increase in success" gets lower and approaches to zero from about 40 sponsors. After this number, the increase is already insignificant. At the same time, according to the table above, the growth may even be negative for some values of the number of sponsors more than 100. Nevertheless, the general logic is that the more sponsors there are, the greater the chances of success.
+
+From this we can conclude that we need to find at least 40 sponsors so that we have much more chances to create a successful project. And if we set a condition to recruit 40 sponsors or more, then the probability of getting a successful project will be 83.6%. Of course, we could have taken more sponsors for the lower border, but let's be lenient towards ourselves. After all, we could put at least 6553 sponsors, then the probability of getting a successful project would be 100% But how real is it? There are only 0.0015% of such projects.
+
+```{r eval=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+nrow(filter(kickstarter, backers >= 6553))/nrow(kickstarter)
+```
+
+And yet, it is very important to note the following. What we have learned is the minimum starting audience, thanks to which the product will not get lost in the list of other projects. Therefore, it is very important for startups to find this number of backers as soon as possible in order to get into trends and attract attention.
+
+Thus, we found out that the number of backers directly and very strongly affects the success of the project. However, new questions have emerged. Why did projects that had a large number of sponsors, say, 500 or more, turn out to be a failure? Why did some successful projects have only 1-3 sponsors?
+
+Possible answers are the following:
+
+1. Projects with a large number of sponsors, which nevertheless turned out to be a failure, could be too large-scale - that is, they needed too much money to complete the project;
+
+2. Successful projects with a very small number of sponsors could "shoot" thanks to generous business angels and / or a small amount was required.
+
+Let's check how much the amount of money required to complete the project (**usd_goal_real**) affects the success of the project.
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+ggplot(data = kickstarter, aes(x = state, y = usd_goal_real)) + geom_boxplot() +xlab("Project state") + ylab("Amount of money, in USD")+ scale_x_discrete(labels = c('Failed', "Successful")) + scale_y_continuous( labels = scales::comma) + theme_minimal()
+```
+  
+As you might expect, projects that were too large-scale were really unsuccessful. Funnily enough, the two projects were so ambitious that they asked for over \$150M (!). Our expectations are more modest, so let's remove too strong outliers by setting the threshold of $10M and look at the bigger picture by zooming in on the graph:
+  
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+kickstarter_outliers1 = kickstarter %>% filter(goal < 10000000)
+
+ggplot(data = kickstarter_outliers1, aes(x = state, y = usd_goal_real)) + geom_boxplot() +xlab("Project state") + ylab("Amount of money, in USD")+ scale_x_discrete(labels = c('Failed', "Successful")) + scale_y_continuous( labels = scales::comma,breaks = scales::pretty_breaks(n = 15))+ 
+    coord_cartesian(ylim = c(0, 100000)) + theme_minimal()
+```
+  
+It is very similar to the situation with the number of backers. But now the relationship looks like the opposite: a more modest goal - more chances for success. To be more confident, let's build a scatter plot that will show the nature of the relationship between the amount of money required and the likelihood of a project being successful if its goal is greater than n USD.
+
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+kick_goal = kickstarter_outliers1 %>% count(usd_goal_real)
+kick_goal_s = kickstarter_outliers1 %>% filter(state == "successful")%>% count(usd_goal_real)
+kick_goal_full = full_join(kick_goal_s, kick_goal, by = "usd_goal_real") %>% rename(success =n.x, total = n.y) %>% arrange(usd_goal_real)
+kick_goal_full[is.na(kick_goal_full)] = 0
+
+prob_data_usd = data.frame(matrix(ncol = 2, nrow = nrow(kick_goal_full)))
+colnames(prob_data_usd) <- c("usd_goal_real", "probability_of_success")
+
+for (goal in kick_goal_full$usd_goal_real) {
+  
+  # Adding text in the first column of the dataframe
+  prob_data_usd[goal,1] = goal
+  
+  # calculating probability of success with number of backers equal or higher than n
+  goal_filtered = kick_goal_full %>% filter(usd_goal_real >= goal)
+  suc_sum = sum(goal_filtered$success)
+  total_sum = sum(goal_filtered$total)
+  prob_data_usd[goal,2] = suc_sum/total_sum*100
+}
+prob_data_usd = filter(prob_data_usd, !is.na(probability_of_success) == TRUE)
+
+ggplot(data = prob_data_usd, aes(x = usd_goal_real, y = probability_of_success)) + geom_line(color="red")+ coord_cartesian(xlim = c(0, 2100000))+scale_y_continuous(breaks = scales::pretty_breaks(n = 15))+scale_x_continuous(labels = scales::comma,breaks = scales::pretty_breaks(n = 5)) +xlab("Goal, in USD") + ylab("Probability of Success")+theme_minimal()
+```
+  
+According to the graph, we have reason to believe that the larger the requested amount, the lower the probability of success. At the same time, the chances of success tend to zero with the requested amount of more than $2,000,000. It makes sense. However, to the question "Which upper limit to take?" we cannot answer yet, because it depends on the nature of the project. Let's leave this question for our future tree to decide.
+  
+However, we still have not answered the first question: are failed projects with a large number of backers too large-scale? Let's filter the dataset, select only unsuccessful projects with more than 500 sponsors and build a scatter plot with logarithmic scaling of the y-axis.
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+kickstarter_failed_filtered = kickstarter %>% filter(state == "failed", backers >500) %>% select(state, backers, usd_goal_real) %>% arrange(-backers)
+kickstarter_success_filtered = kickstarter %>% filter(state == "successful", backers >500) %>% select(state, backers, usd_goal_real) %>% arrange(-backers)
+
+ggplot() + geom_point(data = kickstarter_failed_filtered, aes(x = backers, y = usd_goal_real),color="red")+ scale_y_log10()+ggtitle("Failed projects with >500 backers - how much money they want") + theme_minimal()+xlab("Numbers of backers") + ylab("Goal, in USD")+scale_x_continuous(labels = scales::comma,breaks = scales::pretty_breaks(n = 5)) 
+```
+  
+Indeed, all but two values are above the 3rd quartile of successful projects, i.e. amount of 10 thousand dollars. At the same time, one of the projects requested a very high amount of more than 10 million dollars and could not collect it with more than 2,000 investors. So our assumption is partially confirmed, although there are successful projects that set about the same lofty goals. You can see this in the chart below:
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+ggplot() + geom_point(data = kickstarter_success_filtered, aes(x = backers, y = usd_goal_real),color="green")+ scale_y_log10()+ggtitle("Successful projects with >500 backers - how much money they want") + theme_minimal()+xlab("Numbers of backers") + ylab("Goal, in USD")+scale_x_continuous(labels = scales::comma,breaks = scales::pretty_breaks(n = 5)) 
+```
+  
+It would be interesting to know how the average amount of one investor (**pledged / backers**) affects the success of the project. This would help us understand who it is better to target - rich business angels (those are few, but they pay a lot) or "sponsors from the crowd" (a lot of people, but they pay little). Let's create a new column **avg_pledged** and build boxplots.
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+kickstarter1 = kickstarter %>% mutate(avg_pledged = usd_pledged_real/backers)
+kickstarter1$avg_pledged[is.nan(kickstarter1$avg_pledged)]<-0
+kickstarter1$avg_pledged[!is.finite(kickstarter1$avg_pledged)]<-0
+ggplot(data = kickstarter1, aes(x = state, y = avg_pledged)) + geom_boxplot() +xlab("Project state") + ylab("Pledged in average per backer, in USD")+ scale_x_discrete(labels = c('Failed', "Successful"))  + theme_minimal()+scale_y_log10()
+```
+
+There is no big difference, although individual people gave on average more money to successful projects than to unsuccessful ones.
+
+It is also interesting to see how some of the campaigns have collected over 10,000 sponsors. I am guessing that this is due to the attraction of sponsors through third-party resources like [Funded Today](https://www.funded.today/ "Funded Today"). It's also possible that "startups" already had a decent ad budget that they had generated from previous campaigns, were driving traffic through Google Adwords and social media, and were essentially using the platform to check if the product was market-fit. This statement should also be checked.
+
+Finally, the last question. Does the duration of the campaign (the period between launch and deadline) affect the success of the project?
+
+Let's create a **campaign_dur** column that shows the difference in days between the project completion date and the launch date and build a bar chart.
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+kickstarter1 = kickstarter1  %>% mutate(campaign_dur = deadline - launched)
+kickstarter1_counted = kickstarter1 %>% select(state, campaign_dur) %>% group_by(state) %>% summarise(mean_dur = mean(campaign_dur)) %>% mutate(mean_dif = mean_dur[1]-mean_dur[2])
+
+ggplot(kickstarter1_counted, aes(x = state, y = mean_dur)) + geom_bar(aes(fill = state), stat = 'identity', show.legend = FALSE,alpha = 0.8, width = 0.7)+ scale_y_continuous(breaks = scales::pretty_breaks(n = 15))+ scale_x_discrete(labels = c('Failed', "Successful"))+
+  scale_fill_manual(values=c("red", "green")) +ggtitle("Mean duration of campaigns on Kickstarter") +xlab("Project state")+ylab("Mean duration (in days")+ theme_minimal()
+```
+  
+Oddly enough, but unsuccessful projects have a campaign duration on average 3 days longer than successful ones. 
+
+
+### Conclusions from the exploratory analysis
+
+We have found that projects have a good chance of success if they have the following characteristics:
+
+* They fall into the categories "Theater" or "Dancing";
+
+* Will attract at least 40 sponsors;
+
+* They ask for a not too large amount;
+
+* It may be useful to attract fewer, but richer backers, although it is not always the case.
+
+Also, I specifically decided not to consider other variables like currency, country, etc. From the point of view of common sense, these variables are unlikely to greatly affect the future state the project, while difficulties with generalization may arise.
+
+### Decision tree and predictive model
+
+Hooray! Finally, we got to the most important thing - predicting the results for everything that we have found out. However, before we build the tree, let's do something else in our dataset. We need to drop column **usd_pledged_real**, otherwise our algorithm will start cheating. **avg_pledged** we will leave as it is.
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+kickstarter2 = kickstarter1 %>% select(-usd_pledged_real)
+```
+
+So, let's split our data into training and testing set. We include 80% of observations into training set and 20% of observations into test set.
+Then, we run the algorithm, using all the columns, except **id**, **name**, **goal** (because it is correlated with usd_goal_read), **deadline**, **launched** and **campaign_dur** (because we created it manually).
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+# Converting to character, then again to factor in order to get rid of unused levels
+kickstarter2$state = as.factor(as.character(kickstarter2$state))
+
+#Splitting to train and test set
+set.seed(4321)
+kick_train = kickstarter2 %>% dplyr::sample_frac(.8)
+kick_test = dplyr::anti_join(kickstarter2, kick_train)
+```
+We are going to build a full decision tree with complexity parameter = 0. Then, we will look at xerror and pick optimal value for cp.
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+simple_decision_tree = rpart(state ~ backers+category+country+usd_goal_real+main_category+currency, data = kick_train, cp = -1)
+printcp(simple_decision_tree)
+```
+Optimal value for CP is 8.3985e-05. Let's prune our tree and take a look at accuracy score on training and testing set.
+```{r}
+simple_decision_tree = prune(simple_decision_tree, cp = 0.000083985)
+
+prediction_train = predict(simple_decision_tree, kick_train, type = "class")
+prediction_test = predict(simple_decision_tree, kick_test, type = "class")
+confMat_train <- table(kick_train$state,prediction_train)
+z1_train = (confMat_train[1,1]+confMat_train[2,2])/sum(confMat_train)
+glue('Accuracy on train set = {z1_train}')
+confMat_test <- table(kick_test$state,prediction_test)
+z1 = (confMat_test[1,1]+confMat_test[2,2])/sum(confMat_test)
+knitr::kable(confMat_test)
+glue('Accuracy on test set = {z1}')
+```
+
+Our first simple algorithm has the accuracy of 93% on test set, which is pretty good.
+
+Now let's add new columns that will show whether the projects meet our conditions or not. If they match, put "yes", if not - "no". The first new column is called **is_main_cat** - it checks if the project is in one of the two "successful" categories. Let's call the second one **is_40_backers** - this column will check if the project has 40 or more backers.
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+kickstarter_final = kickstarter2 %>% mutate(is_main_cat = ifelse(main_category == "Dance"| main_category == "Theater", "yes", "no"),is_40_backers = ifelse(backers >= 40, "yes", "no"))
+```
+
+This is necessary in order for the tree to split across the **backers** and **main_category** variables exactly the way we want. Otherwise, the algorithm will not take into account our limitations, which we justified above.
+
+So, we are building a tree using the variables **usd_goal_real**, **campaign_dur**, **is_main_cat**, **avg_pledged** and **is_40_backers**. Let's set the tree complexity parameter to 0 and look at the value of xerror.
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+set.seed(4321)
+kick_train = kickstarter_final %>% dplyr::sample_frac(.8)
+kick_test = dplyr::anti_join(kickstarter_final, kick_train)
+```
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+decision_tree = rpart(state ~ usd_goal_real+campaign_dur+is_main_cat+is_40_backers+avg_pledged, data = kick_train, control = rpart.control(cp = -1))
+printcp(decision_tree)
+```
+
+So, best CP value for this tree is 5.9101e-05. Let's pick it up and take a look at score.
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+decision_tree = prune(decision_tree, cp = 0.000059101)
+
+prediction_train = predict(decision_tree, kick_train, type = "class")
+prediction_test = predict(decision_tree, kick_test, type = "class")
+confMat_train <- table(kick_train$state,prediction_train)
+z1_train = (confMat_train[1,1]+confMat_train[2,2])/sum(confMat_train)
+glue('Accuracy on train set = {z1_train}')
+confMat_test <- table(kick_test$state,prediction_test)
+z1 = (confMat_test[1,1]+confMat_test[2,2])/sum(confMat_test)
+knitr::kable(confMat_test)
+glue('Accuracy on test set = {z1}')
+```
+  
+Unfortunately, we got worse performance than using all the columns. Now, we have accuracy of 90.6%.
+
+Finally, we are going to use variables from both decision trees simultaneously. But at this time we'll take complexity parameter equal to 0.01, as a standard, because we want interpretability.
+
+```{r}
+final_decision_tree = rpart(state ~ backers+category+country+usd_goal_real+main_category+currency+usd_goal_real+campaign_dur+is_main_cat+is_40_backers+avg_pledged, data = kick_train)
+
+prediction_train = predict(final_decision_tree, kick_train, type = "class")
+prediction_test = predict(final_decision_tree, kick_test, type = "class")
+confMat_train <- table(kick_train$state,prediction_train)
+z1_train = (confMat_train[1,1]+confMat_train[2,2])/sum(confMat_train)
+glue('Accuracy on train set = {z1_train}')
+confMat_test <- table(kick_test$state,prediction_test)
+z1 = (confMat_test[1,1]+confMat_test[2,2])/sum(confMat_test)
+knitr::kable(confMat_test)
+glue('Accuracy on test set = {z1}')
+tnr = confMat_test[2,2]/(confMat_test[2,2]+confMat_test[2,1])
+glue('True Negative Rate = {round(tnr,3)}')
+tpr = confMat_test[1,1]/(confMat_test[1,1]+confMat_test[1,2])
+glue('True Positive Rate = {round(tpr,3)}')
+recall = confMat_test[1,1]/(confMat_test[1,1]+confMat_test[2,1])
+f1 = 2*((tpr*recall)/(tpr+recall))
+glue('F1 Score = {round(f1,3)}')
+rpart.plot(final_decision_tree)
+```
+
+Based on the confusion matrix, the True Negative Rate (specificity) - the probability that a successful project will be predicted correctly - will be 91.9%. Accordingly, the False Positive Rate, that is, the probability that a successful project will be falsely considered unsuccessful, is 8.1%. False Negative Rate, or the probability that unsuccessful projects will be defined as successful, will be 8%. True Positive Rate, respectively, will be equal to 92%. Also, we got pretty high F1-score metrics. So, we got really good results, despite we didn't even pick optimal CP.
+  
+It is possible to notice that although we "manually" found out minimal number of backers, the decision tree didn't use our new column. In contrast, **avg_pledged** was used in splitting, so that this new variable somehow improved the results. Besides, final decision tree use only three variables - **backers**, **usd_goal_real** and **avg_pledged**. 
+  
+As for the answer to the question "why the trees were not divided into main categories or the duration of the campaign", then everything is quite logical. In the second case, the difference in the average duration, as we remember, was very small. As for the main four "successful" categories, they were most likely related to the number of sponsors. I suppose that people sponsor these categories more willingly than others, and they do not require a lot of funds to implement them. Especially when it comes to comics. So this should be considered in further research.
