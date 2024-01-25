@@ -1,0 +1,229 @@
+---
+title: "Анализ сетей книг"
+author: "Лунев Степан, silunev"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Загрузка библиотек и данных
+
+Для начала загрузим все необходимые данные, а также преобразуем все переменные в нужные форматы.
+
+```{r, echo=FALSE, message=FALSE}
+library(readr)
+library(dplyr)
+library(igraph)
+library(stringr)
+library(ggraph)
+library(visNetwork)
+
+comics_net = read_graph("~/shared/minor2_2020/data/good_read/book_net.hml", format = "graphml")
+load("~/shared/minor2_2020/data/good_read/books_net_info.RData")
+```
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+
+# Меняем на категориальную, т.к. колонки принимают ограниченные значения
+books_net_info$authors.0.role = as.factor(books_net_info$authors.0.role)
+books_net_info$authors.1.role = as.factor(books_net_info$authors.1.role)
+books_net_info$country_code = as.factor(books_net_info$country_code)
+books_net_info$language_code = as.factor(books_net_info$language_code)
+books_net_info$popular_shelves.0.name = as.factor(books_net_info$popular_shelves.0.name)
+books_net_info$popular_shelves.1.name = as.factor(books_net_info$popular_shelves.1.name)
+books_net_info$popular_shelves.2.name = as.factor(books_net_info$popular_shelves.2.name)
+books_net_info$popular_shelves.3.name = as.factor(books_net_info$popular_shelves.3.name)
+books_net_info$publisher = as.factor(books_net_info$publisher)
+
+# Меняем на числовую, т.к. в этих колонках числа.
+
+books_net_info$average_rating = as.numeric(books_net_info$average_rating)
+books_net_info$num_pages = as.numeric(books_net_info$num_pages)
+books_net_info$publication_year = as.numeric(books_net_info$publication_year)
+books_net_info$ratings_count = as.numeric(books_net_info$ratings_count)
+
+# Меняем на logiсal, т.к. значение "да" или "нет".
+
+books_net_info$is_ebook = as.logical(books_net_info$is_ebook)
+```
+
+**Главная задача данной работы** - исследовать структуру взаимосвязей между комиксами на основе сети из 777 популярных комиксов, где связь между книгами это похожесь по оценкам пользователей (если книги похожи по пользовательским оценкам, то между ними в графе есть связь). 
+
+## Исследовательские вопросы
+
+1. Какие комиксы являются самыми популярными, а какие наоборот?
+
+2. Есть ли взаимосвязь между оценками пользователей работ одного и того же (первого) автора? 
+
+3. Есть ли какие-то жанры, у которых присутствует склонность к получению похожих оценок? 
+
+Для начала выведем самые популярные комиксы из предложенных данных. Логично будет считать популярность комикса по количеству оценок, ведь чем больше оценок - тем больше просмотров, а значит популярнее комикс.
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+answ1 = books_net_info %>% arrange(desc(ratings_count)) %>%   top_n(10, ratings_count)
+answ1$title <- str_wrap(answ1$title, width = 20)
+ggplot(data = answ1) + geom_bar(aes(x = title, y = ratings_count, fill = ratings_count), stat = 'identity', show.legend = FALSE)+  
+coord_flip() + scale_y_continuous(labels = scales::comma) + theme_bw() + ggtitle('ТОП-10 популярных комиксов') + ylab("Количество отзывов на Goodreads") + theme(axis.title.y = element_blank())
+```
+
+А теперь наоборот, самые непопулярные среди читателей комиксы. 
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+answ11 = books_net_info %>% arrange(ratings_count) %>%   top_n(10, -ratings_count)
+answ11$title <- str_wrap(answ11$title, width = 35)
+
+ggplot(data = answ11) + geom_bar(aes(x = title, y = ratings_count, fill = ratings_count), stat = 'identity', show.legend = FALSE)+  
+coord_flip() + scale_y_continuous(labels = scales::comma)  +theme_bw() + ggtitle('ТОП-10 непопулярных комиксов') + ylab("Количество отзывов на Goodreads") + theme(axis.title.y = element_blank())
+```
+
+Таким образом, самый популярный среди пользователей Goodreads комикс - "Watchmen", когда самый непопулярный и малооцененный - "Batgirl.Volume 1:Beyound Burnside".
+
+Для дальнейших ответов на исследовательские вопросы, нам необходимо добавить к узлам сети несколько атрибутов. Для обозначения автора мы берем колонку **authors.0.author_id**, а для обозначения жанра мы берем колонку **popular_shelves.1.name**.
+
+```{r, echo=FALSE, message=FALSE}
+V(comics_net)$author_id = books_net_info$authors.0.author_id
+V(comics_net)$name = books_net_info$book_id
+V(comics_net)$title = books_net_info$title
+V(comics_net)$popular_shelves.1.name = books_net_info$popular_shelves.1.name
+V(comics_net)$publisher = books_net_info$publisher
+```
+
+А теперь построим оба графика для ответов на данные вопросы:
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+
+comics_net_answ2 <- toVisNetworkData(comics_net)
+comics_net_answ2$nodes$title = comics_net_answ2$nodes$title
+
+visNetwork(nodes = comics_net_answ2$nodes, edges = comics_net_answ2$edges, height = "1600px", width = "2400px") %>% 
+  visIgraphLayout()%>%
+  visOptions(selectedBy = "authors.0.author_id", 
+             highlightNearest = TRUE, 
+             nodesIdSelection = FALSE) %>%
+  visPhysics(stabilization = FALSE) %>% visNodes()
+
+```
+
+Попереключаясь на графике между авторами, мы видим, что связи между комиксами (примерно равные оценки) формируются без какой-то конкретной привязки к автору. Для того, чтобы лишний раз в этом убедиться, нам надо рассчитать коэффициент ассортативнности. Он поможет подтвердить данный вывод.
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+V(comics_net)$authors.0.author_id = factor(books_net_info$authors.0.author_id)
+assortativity_nominal(comics_net, V(comics_net)$authors.0.author_id, directed = F)
+```
+
+Коэффициент ассортативности равен 0.003, что приближенно к 0, а значит, что представленный вывод выше подтвержден. Следовательно, читатели могут по-разному оценивать комиксы одного и того же автора.
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+
+comics_net_answ3 <- toVisNetworkData(comics_net)
+comics_net_answ3$nodes$title = comics_net_answ3$nodes$title
+
+visNetwork(nodes = comics_net_answ3$nodes, edges = comics_net_answ3$edges, height = "1600px", width = "2400px") %>% 
+  visIgraphLayout()%>%
+  visOptions(selectedBy = "popular_shelves.1.name", 
+             highlightNearest = TRUE, 
+             nodesIdSelection = FALSE) %>%
+  visPhysics(stabilization = FALSE) %>% visNodes()
+
+```
+
+Попрыгая на графике между жанрами, мы узнаем, что никаких сообществ книг с похожими оценками нет. Даже невзирая на одинаковый жанр, комиксы разбросаны в пространстве. Чтобы определить склонность образования связей по похожим жанрам, мы как и для прошлого графика  нам рассчитаем коэффициент ассортативности. Он поможет нам окончательно убедиться в наших выводах.
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+V(comics_net)$popular_shelves.1.name = factor(books_net_info$popular_shelves.1.name)
+assortativity_nominal(comics_net, V(comics_net)$popular_shelves.1.name, directed = F)
+```
+
+Полученный коэффициент ассортативности равен 0.0009, что довольно таки близко к 0, и говорит нам о факте связи между комиксами без привязки к какому-то конкретному жанру. Следовательно, можно окончательно сказать, что комиксы склонны к получению похожих оценок вне зависимости от жанра.
+
+## Выявление значимых вершин
+
+Выявление значимых вершин будет происходить с помощью метрик центральности. В данной работе будут использованы две метрики: *degree* и *betweenness*
+
+**Использованные меры центральности: **
+
+Для того, чтобы определить вершины с наибольшим количеством связей, мы используем метрику *degree*, после чего выведем 10 первых значений.
+
+```{r, echo=FALSE, message=FALSE}
+cent1 = degree(comics_net) %>% 
+  sort.int(decreasing = TRUE) %>% 
+  as.data.frame() %>% 
+  rename(degree = ".")
+head(cent1, n = 10)
+```
+
+Затем, с помощью метрики *betweenness* мы определим "вершины-мосты" нашей сети, которые соединяют наибольшее количество сообществ. Также обозначим 10 первых значений.
+
+```{r, echo=FALSE, message=FALSE}
+cent2 = betweenness(comics_net) %>% 
+  sort.int(decreasing = TRUE) %>% 
+  as.data.frame() %>% 
+  rename(betweenness = ".")
+head(cent2, n = 10)
+```
+
+#### Визуализация
+
+Теперь же визуализируем сеть с дифференциацией ее вершин по цвету и размеру согласно нашим метрикам:
+
+```{r, echo=FALSE, message=FALSE}
+comics_net %>% 
+  ggraph(layout = "kk") +
+  geom_edge_link(alpha = 0.1) +
+  geom_node_point(aes(color = degree(comics_net), size = degree(comics_net))) +
+  theme_graph() +
+  scale_colour_gradient(low = 'yellow', high = 'red') +
+  ggtitle("Визуализация сети по метрике degree")
+```
+
+```{r, echo=FALSE, message=FALSE}
+comics_net %>% 
+  ggraph(layout = "kk") +
+  geom_edge_link(alpha = 0.1) +
+  geom_node_point(aes(color = betweenness(comics_net), size = betweenness(comics_net))) +
+  theme_graph() +
+  scale_colour_gradient(low = 'yellow', high = 'red') +
+  ggtitle("Визуализация сети по метрике betweenness")
+```
+
+#### Выводы
+
+Таким образом, мы определили ТОП-10 вершин согласно метрикам *degree* и *betweenness*. На обеих графиках можно увидеть крупные скопления вершин,а также увидеть, что в центре этих скоплений и находятся вершины с самыми высокими значениями *degree* и *betweenness*, что может нам говорить о том, что скопления могли образоваться именно благодаря им в первую очередь. В добавок к этому, если еще раз посмотреть на ТОП-10 значений, то мы можем увидеть одинаковые вершины в обеих метриках, например, 282356, 59980, 25102.
+
+## Выявление групп книг
+
+В этом пункте мы выделим сообщества книг, которые схожи по своим оценкам. 
+
+**Использованные меры выделения сообществ: **
+
+Для выявления сообществ в данной работе будет использован метод *fast-greedy* 
+
+```{r, echo=FALSE, message=FALSE, results='hide'}
+fg_comics = fastgreedy.community(comics_net)
+membership(fg_comics)
+```
+
+#### Визуализация
+
+```{r, echo=FALSE, message=FALSE}
+
+plot(fg_comics, comics_net, vertex.label=NA)
+```
+
+#### Выводы
+
+Результатом визуализации можно выделить, что получилось довольно много сообществ, если быть точным - 28 штук. Это говорит нам о множестве представленных различий между представленными произведениями в данном датасете.
+
+## Общие выводы
+
+Подводя итоги данной работы, можно выделить следующие выводы:
+
+1. Самый популярный комикс - "Watchmen", когда самый непопулярный - "Batgirl.Volume 1:Beyound Burnside".
+
+2. Читатели могут по-разному оценивать комиксы одного и того же автора, связи между комиксами формируются без какой-то конкретной привязки к авторую.
+
+3. Комиксы склонны к получению похожих оценок вне зависимости от жанра, а значит жанры, у которых присутствует склонность к получению похожих оценок - отсутствуют.
+
+4. У произведений в представленном датасете множество различий, из-за чего было выделено большое количество сообществ, а именно - 28 штук.
